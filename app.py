@@ -1,11 +1,12 @@
 """
 Company Docs Q&A Bot - Main Flask Application
-Phase 2 Complete: Enhanced Q&A System with Advanced Features
+Phase 3: Production-Ready with Advanced Error Handling & Validation
 """
 import os
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 from dotenv import load_dotenv
 import logging
 
@@ -31,6 +32,43 @@ embedding_manager = None
 vector_store = None
 search_engine = None
 answer_generator = None
+error_handler = None
+feedback_manager = None
+
+# Error Handlers
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(error):
+    return jsonify({
+        'error': 'File too large. Please use files smaller than 10MB.',
+        'help': 'Try compressing your file or splitting large documents into smaller sections.'
+    }), 413
+
+@app.errorhandler(404)
+def handle_not_found(error):
+    if request.path.startswith('/api') or request.headers.get('Content-Type') == 'application/json':
+        return jsonify({
+            'error': 'Endpoint not found',
+            'available_endpoints': ['/', '/upload', '/ask', '/documents', '/health']
+        }), 404
+    return render_template('index.html'), 404
+
+@app.errorhandler(500)
+def handle_internal_error(error):
+    logger.error(f"Internal server error: {error}")
+    return jsonify({
+        'error': 'Internal server error. Please try again or contact support if the problem persists.',
+        'help': 'Check that all services are properly configured and running.'
+    }), 500
+
+@app.errorhandler(Exception)
+def handle_general_exception(error):
+    if error_handler:
+        error_message, status_code = error_handler.handle_general_error(error, 'request_processing')
+        error_handler.log_error(error, {'path': request.path, 'method': request.method})
+        return jsonify({'error': error_message}), status_code
+    else:
+        logger.error(f"Unhandled exception: {error}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
 @app.route('/')
 def index():
@@ -41,6 +79,7 @@ def index():
 def upload_documents():
     """Handle document upload and processing with full pipeline"""
     try:
+        logger.info("📤 Upload request started")
         if 'files' not in request.files:
             return jsonify({'error': 'No files provided'}), 400
         
@@ -48,25 +87,34 @@ def upload_documents():
         if not files or all(f.filename == '' for f in files):
             return jsonify({'error': 'No files selected'}), 400
         
+        logger.info(f"📁 Processing {len(files)} files")
         processed_files = []
-        for file in files:
+        for i, file in enumerate(files):
             if file and file.filename:
+                logger.info(f"🔍 File {i+1}: {file.filename} ({file.content_length if hasattr(file, 'content_length') else 'unknown'} bytes)")
+                
                 # Validate file type
+                logger.info(f"✅ Validating file: {file.filename}")
                 if not document_processor.validate_file(file):
                     return jsonify({'error': f'Invalid file type: {file.filename}'}), 400
                 
                 # Save file
+                logger.info(f"💾 Saving file: {file.filename}")
                 filename = secure_filename(file.filename)
                 filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(filepath)
                 
                 # Process document
+                logger.info(f"📝 Processing document: {filename}")
                 result = document_processor.process_document(filepath)
                 doc_id = result['id']
+                logger.info(f"✅ Document processed with ID: {doc_id}")
                 
                 # Generate embeddings and store in vector database
+                logger.info(f"📖 Getting document content for: {doc_id}")
                 text_content = document_processor.get_document_content(doc_id)
                 if text_content:
+                    logger.info(f"🧠 Starting embedding generation for {len(text_content)} characters...")
                     # Process document for embeddings
                     chunks_with_embeddings = embedding_manager.process_document_for_embeddings(
                         doc_id=doc_id,
@@ -74,14 +122,18 @@ def upload_documents():
                         filename=result['filename'],
                         file_type=result['file_type']
                     )
+                    logger.info(f"✅ Embedding generation complete: {len(chunks_with_embeddings) if chunks_with_embeddings else 0} chunks")
                     
                     # Store in Qdrant
                     if chunks_with_embeddings:
+                        logger.info(f"🗄️ Storing {len(chunks_with_embeddings)} chunks in Qdrant...")
                         vector_store.store_document_chunks(chunks_with_embeddings)
-                        logger.info(f"Stored {len(chunks_with_embeddings)} chunks in vector database")
+                        logger.info(f"✅ Stored {len(chunks_with_embeddings)} chunks in vector database")
                         
                         # Update search engine index
+                        logger.info(f"🔍 Updating search index for: {doc_id}")
                         search_engine.add_document_to_index(doc_id)
+                        logger.info(f"✅ Search index updated")
                         
                         result['chunks_stored'] = len(chunks_with_embeddings)
                         result['vector_storage'] = True
@@ -91,15 +143,18 @@ def upload_documents():
                         logger.warning(f"No chunks generated for {filename}")
                 
                 processed_files.append(result)
-                logger.info(f"Successfully processed: {filename}")
+                logger.info(f"🎉 Successfully processed: {filename}")
         
+        logger.info(f"✅ All files processed successfully! Returning response...")
         return jsonify({
             'message': f'Successfully processed {len(processed_files)} documents',
             'files': processed_files
         })
         
     except Exception as e:
-        logger.error(f"Error processing documents: {str(e)}")
+        logger.error(f"💥 Error processing documents: {str(e)}")
+        import traceback
+        logger.error(f"💥 Traceback: {traceback.format_exc()}")
         return jsonify({'error': 'Failed to process documents'}), 500
 
 @app.route('/ask', methods=['POST'])
@@ -297,4 +352,5 @@ if __name__ == '__main__':
         logger.error("Application starting with limited functionality")
     
     # Run the app
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.getenv('PORT', 5000))
+    app.run(debug=True, host='0.0.0.0', port=port)

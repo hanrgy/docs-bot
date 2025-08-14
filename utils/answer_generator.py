@@ -9,6 +9,7 @@ import json
 
 from openai import OpenAI
 from dotenv import load_dotenv
+# from .validator import AnswerValidator  # TODO: Implement in Phase 3
 
 load_dotenv('.env.local')
 
@@ -32,6 +33,7 @@ class AnswerGenerator:
             raise ValueError("OpenAI API key is required")
         
         self.client = OpenAI(api_key=self.api_key)
+        # self.validator = AnswerValidator()  # TODO: Implement in Phase 3
         
         logger.info(f"AnswerGenerator initialized with model: {self.model}")
     
@@ -165,14 +167,36 @@ Please answer the question based on the provided sources. Include citations usin
             # Process citations in the answer
             processed_citations = self.process_answer_citations(answer_text, citations)
             
-            logger.info(f"Generated answer with confidence {confidence:.2f}")
+            # Validate answer quality
+            # TODO: Implement validation in Phase 3
+            # validation_report = self.validator.validate_answer_against_sources(answer_text, search_results)
+            # should_flag, flag_reason = self.validator.should_flag_answer(validation_report)
+            # validation_summary = self.validator.get_validation_summary(validation_report)
+            validation_report = {}
+            should_flag = False
+            flag_reason = None
+            validation_summary = "Validation not implemented yet"
             
-            return {
+            # Adjust confidence based on validation
+            adjusted_confidence = confidence  # No validation adjustment until Phase 3
+            
+            logger.info(f"Generated answer with confidence {adjusted_confidence:.2f} | Validation: {validation_summary}")
+            
+            result = {
                 'answer': answer_text,
-                'confidence': confidence,
+                'confidence': adjusted_confidence,
                 'citations': processed_citations,
-                'context_used': len(citations)
+                'context_used': len(citations),
+                'validation': {
+                    'score': validation_report.get('overall_score', 0.0),
+                    'summary': validation_summary,
+                    'flagged': should_flag,
+                    'flag_reason': flag_reason if should_flag else None,
+                    'recommendations': validation_report.get('recommendations', [])
+                }
             }
+            
+            return result
             
         except Exception as e:
             logger.error(f"Error generating answer: {e}")
