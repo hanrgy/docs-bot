@@ -7,9 +7,14 @@ class DocsBot {
         this.documents = [];
         this.isUploading = false;
         this.isAsking = false;
+        this.queryCache = new Map(); // Cache for recent queries
+        this.queryHistory = JSON.parse(localStorage.getItem('queryHistory') || '[]');
+        this.maxCacheSize = 50;
+        this.maxHistorySize = 100;
         this.initializeEventListeners();
         this.loadDocuments();
         this.checkHealth();
+        this.setupQuerySuggestions();
     }
 
     initializeEventListeners() {
@@ -185,7 +190,12 @@ class DocsBot {
                         <span><i class="fas fa-file-alt mr-1"></i>${doc.file_type.toUpperCase()}</span>
                         <span><i class="fas fa-weight mr-1"></i>${this.formatFileSize(doc.file_size)}</span>
                         <span><i class="fas fa-align-left mr-1"></i>${doc.word_count} words</span>
+                        ${doc.chunks_stored ? `<span><i class="fas fa-cubes mr-1"></i>${doc.chunks_stored} chunks</span>` : ''}
                     </div>
+                    ${doc.vector_storage ? 
+                        '<div class="text-xs text-green-600 mt-1"><i class="fas fa-check-circle mr-1"></i>Vector indexed</div>' :
+                        '<div class="text-xs text-yellow-600 mt-1"><i class="fas fa-exclamation-circle mr-1"></i>Processing...</div>'
+                    }
                 </div>
                 <button onclick="docsBot.deleteDocument('${doc.id}')" 
                         class="text-red-500 hover:text-red-700 p-1">
@@ -254,6 +264,16 @@ class DocsBot {
             return;
         }
 
+        // Check cache first
+        const cacheKey = this.getCacheKey(question);
+        if (this.queryCache.has(cacheKey)) {
+            console.log('Using cached result for:', question);
+            const cachedResult = this.queryCache.get(cacheKey);
+            this.displayAnswer(cachedResult);
+            this.addToQueryHistory(question);
+            return;
+        }
+
         this.isAsking = true;
         this.showLoading();
         this.disableAskButton();
@@ -273,6 +293,13 @@ class DocsBot {
             }
 
             const result = await response.json();
+            
+            // Cache the result
+            this.cacheQuery(cacheKey, result);
+            
+            // Add to history
+            this.addToQueryHistory(question);
+            
             this.displayAnswer(result);
 
         } catch (error) {
@@ -282,6 +309,156 @@ class DocsBot {
             this.hideLoading();
             this.enableAskButton();
         }
+    }
+    
+    getCacheKey(question) {
+        // Create a cache key based on question and current documents
+        const docIds = this.documents.map(d => d.id).sort().join(',');
+        return `${question.toLowerCase().trim()}_${docIds}`;
+    }
+    
+    cacheQuery(key, result) {
+        // Implement LRU cache
+        if (this.queryCache.size >= this.maxCacheSize) {
+            const firstKey = this.queryCache.keys().next().value;
+            this.queryCache.delete(firstKey);
+        }
+        this.queryCache.set(key, result);
+    }
+    
+    addToQueryHistory(question) {
+        // Add to history, avoiding duplicates
+        const index = this.queryHistory.indexOf(question);
+        if (index > -1) {
+            this.queryHistory.splice(index, 1);
+        }
+        this.queryHistory.unshift(question);
+        
+        // Limit history size
+        if (this.queryHistory.length > this.maxHistorySize) {
+            this.queryHistory = this.queryHistory.slice(0, this.maxHistorySize);
+        }
+        
+        // Save to localStorage
+        localStorage.setItem('queryHistory', JSON.stringify(this.queryHistory));
+        this.updateQuerySuggestions();
+    }
+    
+    setupQuerySuggestions() {
+        const questionInput = document.getElementById('question-input');
+        const suggestionsContainer = this.createSuggestionsContainer();
+        
+        questionInput.addEventListener('input', (e) => {
+            const value = e.target.value.trim();
+            if (value.length > 2) {
+                this.showQuerySuggestions(value, suggestionsContainer);
+            } else {
+                suggestionsContainer.style.display = 'none';
+            }
+        });
+        
+        questionInput.addEventListener('focus', () => {
+            const value = questionInput.value.trim();
+            if (value.length > 2) {
+                this.showQuerySuggestions(value, suggestionsContainer);
+            }
+        });
+        
+        questionInput.addEventListener('blur', () => {
+            // Delay hiding to allow click on suggestions
+            setTimeout(() => {
+                suggestionsContainer.style.display = 'none';
+            }, 200);
+        });
+    }
+    
+    createSuggestionsContainer() {
+        const questionInput = document.getElementById('question-input');
+        const container = document.createElement('div');
+        container.id = 'query-suggestions';
+        container.className = 'absolute z-10 w-full bg-white border border-gray-300 rounded-lg shadow-lg mt-1 max-h-48 overflow-y-auto hidden';
+        container.style.display = 'none';
+        
+        // Position relative to input
+        questionInput.parentElement.style.position = 'relative';
+        questionInput.parentElement.appendChild(container);
+        
+        return container;
+    }
+    
+    showQuerySuggestions(input, container) {
+        const suggestions = this.getQuerySuggestions(input);
+        
+        if (suggestions.length === 0) {
+            container.style.display = 'none';
+            return;
+        }
+        
+        container.innerHTML = suggestions.map(suggestion => `
+            <div class="px-4 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100 last:border-b-0"
+                 onclick="docsBot.selectSuggestion('${suggestion.replace(/'/g, "\\'")}')">
+                <div class="text-sm text-gray-900">${suggestion}</div>
+                <div class="text-xs text-gray-500">Previous query</div>
+            </div>
+        `).join('');
+        
+        container.style.display = 'block';
+    }
+    
+    getQuerySuggestions(input) {
+        const inputLower = input.toLowerCase();
+        
+        // Search in query history
+        const historySuggestions = this.queryHistory
+            .filter(query => query.toLowerCase().includes(inputLower))
+            .slice(0, 5);
+        
+        // Add smart suggestions based on input
+        const smartSuggestions = this.getSmartSuggestions(inputLower);
+        
+        // Combine and deduplicate
+        const allSuggestions = [...new Set([...historySuggestions, ...smartSuggestions])];
+        
+        return allSuggestions.slice(0, 6);
+    }
+    
+    getSmartSuggestions(input) {
+        const suggestions = [];
+        
+        // Common question patterns
+        if (input.includes('what')) {
+            suggestions.push('What is the policy on remote work?');
+            suggestions.push('What are the requirements for promotion?');
+        }
+        
+        if (input.includes('how')) {
+            suggestions.push('How do I submit a time-off request?');
+            suggestions.push('How do I access the employee portal?');
+        }
+        
+        if (input.includes('when')) {
+            suggestions.push('When are performance reviews conducted?');
+            suggestions.push('When do benefits take effect?');
+        }
+        
+        if (input.includes('who')) {
+            suggestions.push('Who should I contact for IT support?');
+            suggestions.push('Who approves expense reports?');
+        }
+        
+        return suggestions;
+    }
+    
+    selectSuggestion(suggestion) {
+        const questionInput = document.getElementById('question-input');
+        questionInput.value = suggestion;
+        document.getElementById('query-suggestions').style.display = 'none';
+        questionInput.focus();
+    }
+    
+    updateQuerySuggestions() {
+        // This could trigger an update of the suggestions UI if needed
+        // For now, the suggestions are dynamically generated
     }
 
     displayAnswer(result) {
@@ -296,35 +473,55 @@ class DocsBot {
         answerSection.classList.remove('hidden');
         answerSection.classList.add('fade-in');
 
-        // Display answer
+        // Display answer with enhanced formatting
         answerContent.innerHTML = this.formatAnswer(result.answer);
 
-        // Display confidence
+        // Display confidence with enhanced details
         const confidence = Math.round((result.confidence || 0) * 100);
         confidenceBar.style.width = `${confidence}%`;
         confidenceText.textContent = `${confidence}%`;
 
-        // Update confidence bar color
+        // Update confidence bar color and add confidence explanation
+        let confidenceClass, confidenceDescription;
         if (confidence >= 80) {
-            confidenceBar.className = 'bg-green-500 h-2 rounded-full transition-all duration-300';
+            confidenceClass = 'bg-green-500 h-2 rounded-full transition-all duration-300';
+            confidenceDescription = 'High confidence - Multiple reliable sources';
         } else if (confidence >= 60) {
-            confidenceBar.className = 'bg-yellow-500 h-2 rounded-full transition-all duration-300';
+            confidenceClass = 'bg-yellow-500 h-2 rounded-full transition-all duration-300';
+            confidenceDescription = 'Medium confidence - Some supporting sources';
         } else {
-            confidenceBar.className = 'bg-red-500 h-2 rounded-full transition-all duration-300';
+            confidenceClass = 'bg-red-500 h-2 rounded-full transition-all duration-300';
+            confidenceDescription = 'Low confidence - Limited or uncertain information';
         }
+        confidenceBar.className = confidenceClass;
+        
+        // Add confidence description
+        const confidenceScore = document.getElementById('confidence-score');
+        const existingDesc = confidenceScore.querySelector('.confidence-description');
+        if (existingDesc) existingDesc.remove();
+        
+        const descElement = document.createElement('div');
+        descElement.className = 'confidence-description text-xs text-gray-600 mt-1';
+        descElement.textContent = confidenceDescription;
+        confidenceScore.appendChild(descElement);
 
-        // Display citations
+        // Display enhanced citations
         if (result.citations && result.citations.length > 0) {
             citationsSection.classList.remove('hidden');
             citationsList.innerHTML = result.citations.map((citation, index) => `
-                <div class="citation p-3 rounded-lg cursor-pointer" onclick="docsBot.showSource('${citation.doc_id}', '${citation.chunk_id}')">
+                <div class="citation p-3 rounded-lg cursor-pointer hover:bg-blue-50 transition-colors" 
+                     onclick="docsBot.showSource('${citation.doc_id}', '${citation.chunk_id}', '${citation.filename}', \`${citation.text.replace(/`/g, '\\`')}\`)">
                     <div class="flex items-start space-x-3">
-                        <span class="bg-blue-600 text-white text-xs px-2 py-1 rounded-full">${index + 1}</span>
+                        <span class="bg-blue-600 text-white text-xs px-2 py-1 rounded-full font-medium">${citation.id || index + 1}</span>
                         <div class="flex-1">
-                            <p class="text-sm font-medium text-gray-900">${citation.filename}</p>
-                            <p class="text-sm text-gray-600 mt-1">${citation.text.substring(0, 200)}...</p>
-                            <div class="flex items-center mt-2 text-xs text-gray-500">
-                                <span>Relevance: ${Math.round(citation.score * 100)}%</span>
+                            <div class="flex items-center justify-between">
+                                <p class="text-sm font-medium text-gray-900">${citation.filename}</p>
+                                <span class="text-xs text-gray-500">${citation.file_type?.toUpperCase() || 'DOC'}</span>
+                            </div>
+                            <p class="text-sm text-gray-600 mt-1 line-clamp-3">${citation.text.substring(0, 250)}${citation.text.length > 250 ? '...' : ''}</p>
+                            <div class="flex items-center justify-between mt-2 text-xs text-gray-500">
+                                <span>Relevance: ${Math.round((citation.score || 0) * 100)}%</span>
+                                <span><i class="fas fa-external-link-alt mr-1"></i>Click to view source</span>
                             </div>
                         </div>
                     </div>
@@ -333,6 +530,9 @@ class DocsBot {
         } else {
             citationsSection.classList.add('hidden');
         }
+        
+        // Add follow-up questions if available
+        this.addFollowUpQuestions(result);
     }
 
     formatAnswer(answer) {
@@ -345,36 +545,135 @@ class DocsBot {
             .replace(/^(.*)$/, '<p>$1</p>');
     }
 
-    showSource(docId, chunkId) {
-        // For MVP, show a simple modal with document info
+    showSource(docId, chunkId, filename, sourceText) {
         const sourceModal = document.getElementById('source-modal');
         const modalContent = document.getElementById('modal-content');
         
         const doc = this.documents.find(d => d.id === docId);
-        if (doc) {
-            modalContent.innerHTML = `
-                <div class="space-y-4">
-                    <div class="border-b pb-4">
-                        <h4 class="text-lg font-semibold text-gray-900">${doc.filename}</h4>
+        
+        modalContent.innerHTML = `
+            <div class="space-y-4">
+                <div class="border-b pb-4">
+                    <h4 class="text-lg font-semibold text-gray-900">${filename || 'Unknown Document'}</h4>
+                    ${doc ? `
                         <div class="flex items-center space-x-4 text-sm text-gray-500 mt-2">
-                            <span>Type: ${doc.file_type.toUpperCase()}</span>
-                            <span>Size: ${this.formatFileSize(doc.file_size)}</span>
-                            <span>Words: ${doc.word_count}</span>
+                            <span><i class="fas fa-file-alt mr-1"></i>Type: ${doc.file_type.toUpperCase()}</span>
+                            <span><i class="fas fa-weight mr-1"></i>Size: ${this.formatFileSize(doc.file_size)}</span>
+                            <span><i class="fas fa-align-left mr-1"></i>Words: ${doc.word_count}</span>
+                            <span><i class="fas fa-cubes mr-1"></i>Chunk: ${chunkId || 'Unknown'}</span>
+                        </div>
+                    ` : ''}
+                </div>
+                
+                ${sourceText ? `
+                    <div>
+                        <h5 class="text-md font-medium text-gray-900 mb-2">Source Content</h5>
+                        <div class="bg-gray-50 p-4 rounded-lg border-l-4 border-blue-500 max-h-64 overflow-y-auto">
+                            <p class="text-sm text-gray-700 whitespace-pre-wrap">${sourceText}</p>
                         </div>
                     </div>
+                ` : `
                     <div>
                         <p class="text-sm text-gray-600">
                             This citation references content from this document. 
-                            Click the citation in the answer to see the specific passage.
+                            The specific passage was used to generate the answer.
                         </p>
                     </div>
+                `}
+                
+                <div class="flex items-center justify-between pt-4 border-t">
+                    <div class="text-xs text-gray-500">
+                        Document ID: ${docId}
+                    </div>
+                    <button onclick="docsBot.closeModal()" 
+                            class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                        Close
+                    </button>
+                </div>
+            </div>
+        `;
+        
+        sourceModal.classList.remove('hidden');
+    }
+    
+    addFollowUpQuestions(result) {
+        // Add follow-up questions section if not exists
+        let followUpSection = document.getElementById('follow-up-section');
+        if (!followUpSection) {
+            const answerSection = document.getElementById('answer-section');
+            followUpSection = document.createElement('div');
+            followUpSection.id = 'follow-up-section';
+            followUpSection.className = 'mt-6 pt-4 border-t';
+            answerSection.appendChild(followUpSection);
+        }
+        
+        // Generate smart follow-up questions based on the answer
+        const followUps = this.generateFollowUpQuestions(result);
+        
+        if (followUps.length > 0) {
+            followUpSection.innerHTML = `
+                <h4 class="text-sm font-semibold text-gray-900 mb-3">
+                    <i class="fas fa-lightbulb mr-1 text-yellow-500"></i>Suggested Follow-up Questions
+                </h4>
+                <div class="space-y-2">
+                    ${followUps.map(question => `
+                        <button onclick="docsBot.askFollowUp('${question.replace(/'/g, "\\'")}'); " 
+                                class="w-full text-left p-2 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors text-sm text-blue-800 border border-blue-200">
+                            <i class="fas fa-question-circle mr-2"></i>${question}
+                        </button>
+                    `).join('')}
                 </div>
             `;
         } else {
-            modalContent.innerHTML = '<p class="text-gray-600">Document not found.</p>';
+            followUpSection.innerHTML = '';
+        }
+    }
+    
+    generateFollowUpQuestions(result) {
+        const followUps = [];
+        const answer = result.answer.toLowerCase();
+        const citations = result.citations || [];
+        
+        // Generate contextual follow-ups based on answer content
+        if (answer.includes('policy') || answer.includes('rule')) {
+            followUps.push('What are the exceptions to this policy?');
+            followUps.push('When was this policy last updated?');
         }
         
-        sourceModal.classList.remove('hidden');
+        if (answer.includes('process') || answer.includes('procedure') || answer.includes('step')) {
+            followUps.push('What are the next steps in this process?');
+            followUps.push('Who is responsible for this process?');
+        }
+        
+        if (answer.includes('requirement') || answer.includes('must') || answer.includes('need')) {
+            followUps.push('What happens if these requirements are not met?');
+        }
+        
+        if (answer.includes('deadline') || answer.includes('time') || answer.includes('schedule')) {
+            followUps.push('What are the key deadlines to remember?');
+        }
+        
+        // Add document-specific follow-ups
+        if (citations.length > 1) {
+            const uniqueDocs = [...new Set(citations.map(c => c.filename))];
+            if (uniqueDocs.length > 1) {
+                followUps.push('Are there any differences between these documents?');
+            }
+        }
+        
+        // Generic helpful follow-ups
+        if (followUps.length < 3) {
+            followUps.push('Can you provide more details about this topic?');
+            followUps.push('Are there any related topics I should know about?');
+        }
+        
+        return followUps.slice(0, 3); // Limit to 3 follow-ups
+    }
+    
+    askFollowUp(question) {
+        const questionInput = document.getElementById('question-input');
+        questionInput.value = question;
+        this.askQuestion();
     }
 
     closeModal() {

@@ -1,7 +1,9 @@
 """
 Company Docs Q&A Bot - Main Flask Application
+Phase 2 Complete: Enhanced Q&A System with Advanced Features
 """
 import os
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -37,7 +39,7 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_documents():
-    """Handle document upload and processing"""
+    """Handle document upload and processing with full pipeline"""
     try:
         if 'files' not in request.files:
             return jsonify({'error': 'No files provided'}), 400
@@ -60,8 +62,35 @@ def upload_documents():
                 
                 # Process document
                 result = document_processor.process_document(filepath)
-                processed_files.append(result)
+                doc_id = result['id']
                 
+                # Generate embeddings and store in vector database
+                text_content = document_processor.get_document_content(doc_id)
+                if text_content:
+                    # Process document for embeddings
+                    chunks_with_embeddings = embedding_manager.process_document_for_embeddings(
+                        doc_id=doc_id,
+                        text_content=text_content,
+                        filename=result['filename'],
+                        file_type=result['file_type']
+                    )
+                    
+                    # Store in Qdrant
+                    if chunks_with_embeddings:
+                        vector_store.store_document_chunks(chunks_with_embeddings)
+                        logger.info(f"Stored {len(chunks_with_embeddings)} chunks in vector database")
+                        
+                        # Update search engine index
+                        search_engine.add_document_to_index(doc_id)
+                        
+                        result['chunks_stored'] = len(chunks_with_embeddings)
+                        result['vector_storage'] = True
+                    else:
+                        result['chunks_stored'] = 0
+                        result['vector_storage'] = False
+                        logger.warning(f"No chunks generated for {filename}")
+                
+                processed_files.append(result)
                 logger.info(f"Successfully processed: {filename}")
         
         return jsonify({
@@ -75,7 +104,7 @@ def upload_documents():
 
 @app.route('/ask', methods=['POST'])
 def ask_question():
-    """Handle Q&A requests"""
+    """Handle Q&A requests with enhanced hybrid search and citations"""
     try:
         data = request.get_json()
         question = data.get('question', '').strip()
@@ -83,20 +112,21 @@ def ask_question():
         if not question:
             return jsonify({'error': 'No question provided'}), 400
         
-        # Search for relevant context
+        # Search for relevant context using hybrid search
         search_results = search_engine.search(question, top_k=5)
         
         if not search_results:
             return jsonify({
                 'answer': 'I could not find relevant information in the uploaded documents to answer your question.',
                 'confidence': 0.0,
-                'citations': []
+                'citations': [],
+                'context_used': 0
             })
         
-        # Generate answer with citations
+        # Generate answer with citations using enhanced answer generator
         answer_data = answer_generator.generate_answer(question, search_results)
         
-        logger.info(f"Answered question: {question[:50]}...")
+        logger.info(f"Answered question: {question[:50]}... (confidence: {answer_data.get('confidence', 0):.2f})")
         return jsonify(answer_data)
         
     except Exception as e:
@@ -105,7 +135,7 @@ def ask_question():
 
 @app.route('/documents', methods=['GET'])
 def list_documents():
-    """List all uploaded documents"""
+    """List all uploaded documents with enhanced metadata"""
     try:
         documents = document_processor.list_documents()
         return jsonify({'documents': documents})
@@ -115,10 +145,19 @@ def list_documents():
 
 @app.route('/documents/<doc_id>', methods=['DELETE'])
 def delete_document(doc_id):
-    """Delete a specific document"""
+    """Delete a specific document from all systems"""
     try:
+        # Delete from vector store first
+        vector_store.delete_document(doc_id)
+        
+        # Remove from search engine index
+        search_engine.remove_document_from_index(doc_id)
+        
+        # Delete from document processor
         result = document_processor.delete_document(doc_id)
+        
         if result:
+            logger.info(f"Document {doc_id} deleted from all systems")
             return jsonify({'message': 'Document deleted successfully'})
         else:
             return jsonify({'error': 'Document not found'}), 404
@@ -128,20 +167,106 @@ def delete_document(doc_id):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'services': {
-            'document_processor': document_processor is not None,
-            'embedding_manager': embedding_manager is not None,
-            'vector_store': vector_store is not None,
-            'search_engine': search_engine is not None,
-            'answer_generator': answer_generator is not None
+    """Comprehensive health check endpoint"""
+    try:
+        health_status = {
+            'status': 'healthy',
+            'version': 'v2.0.0-phase2-complete',
+            'timestamp': datetime.now().isoformat(),
+            'features': [
+                'Document Processing (PDF, Markdown, Text)',
+                'OpenAI Embeddings & Chat Completion',
+                'Qdrant Vector Database',
+                'Hybrid Search (BM25 + Semantic)',
+                'Citation-based Answers',
+                'Confidence Scoring',
+                'Query Caching',
+                'Follow-up Questions'
+            ],
+            'services': {},
+            'stats': {}
         }
-    })
+        
+        # Check service availability
+        services = {
+            'document_processor': document_processor,
+            'embedding_manager': embedding_manager,
+            'vector_store': vector_store,
+            'search_engine': search_engine,
+            'answer_generator': answer_generator
+        }
+        
+        for service_name, service in services.items():
+            if service is not None:
+                # Test service connection if available
+                if hasattr(service, 'test_connection'):
+                    try:
+                        health_status['services'][service_name] = {
+                            'available': True,
+                            'connected': service.test_connection()
+                        }
+                    except:
+                        health_status['services'][service_name] = {
+                            'available': True,
+                            'connected': False
+                        }
+                else:
+                    health_status['services'][service_name] = {
+                        'available': True,
+                        'connected': True
+                    }
+            else:
+                health_status['services'][service_name] = {
+                    'available': False,
+                    'connected': False
+                }
+        
+        # Gather system stats
+        if document_processor:
+            docs = document_processor.list_documents()
+            health_status['stats']['documents'] = len(docs)
+        
+        if vector_store:
+            try:
+                vector_stats = vector_store.get_stats()
+                health_status['stats']['vector_store'] = vector_stats
+            except:
+                health_status['stats']['vector_store'] = {'error': 'Unable to fetch stats'}
+        
+        if search_engine:
+            try:
+                search_stats = search_engine.get_search_stats()
+                health_status['stats']['search_engine'] = search_stats
+            except:
+                health_status['stats']['search_engine'] = {'error': 'Unable to fetch stats'}
+        
+        # Determine overall health
+        all_services_available = all(s['available'] for s in health_status['services'].values())
+        all_services_connected = all(s['connected'] for s in health_status['services'].values())
+        
+        if all_services_available and all_services_connected:
+            health_status['status'] = 'healthy'
+        elif all_services_available:
+            health_status['status'] = 'degraded'
+        else:
+            health_status['status'] = 'unhealthy'
+        
+        return jsonify(health_status)
+        
+    except Exception as e:
+        logger.error(f"Error in health check: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'version': 'v2.0.0-phase2-complete',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
-if __name__ == '__main__':
-    # Import and initialize services
+# Initialize services globally
+def initialize_services():
+    """Initialize all application services"""
+    global document_processor, embedding_manager, vector_store, search_engine, answer_generator
+    
     try:
         from utils.file_processor import DocumentProcessor
         from utils.embeddings import EmbeddingManager
@@ -153,14 +278,23 @@ if __name__ == '__main__':
         document_processor = DocumentProcessor(app.config['UPLOAD_FOLDER'])
         embedding_manager = EmbeddingManager()
         vector_store = QdrantStore()
-        search_engine = HybridSearchEngine(vector_store, document_processor)
+        search_engine = HybridSearchEngine(vector_store, document_processor, embedding_manager)
         answer_generator = AnswerGenerator()
         
-        logger.info("All services initialized successfully")
+        logger.info("All Phase 2 services initialized successfully")
+        return True
         
     except Exception as e:
         logger.error(f"Failed to initialize services: {str(e)}")
-        # Continue without services for development
+        return False
+
+if __name__ == '__main__':
+    # Initialize services
+    if initialize_services():
+        logger.info("🚀 Docs Q&A Bot Phase 2 ready to start!")
+        logger.info("Features: Enhanced search, citations, caching, validation")
+    else:
+        logger.error("Application starting with limited functionality")
     
     # Run the app
     app.run(debug=True, host='0.0.0.0', port=5000)
